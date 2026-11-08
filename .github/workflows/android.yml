@@ -9,6 +9,51 @@ permissions:
   contents: write
 
 jobs:
+  database:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare project (unzip if the ZIP was uploaded as-is)
+        run: |
+          if [ ! -f supabase/schema.sql ]; then
+            ZIP=$(ls ./*.zip 2>/dev/null | head -1)
+            if [ -n "$ZIP" ]; then unzip -o "$ZIP"; fi
+          fi
+          ls -la supabase
+
+      - name: Install tools
+        run: sudo apt-get update -y && sudo apt-get install -y postgresql-client jq
+
+      - name: Set up the database (tables, security, functions)
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ]; then
+            echo "::warning::SUPABASE_DB_URL secret is missing - database setup skipped"
+            exit 0
+          fi
+          psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f supabase/schema.sql
+
+      - name: Create / refresh the admin account
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ] || [ -z "$ADMIN_PASSWORD" ]; then
+            echo "::warning::SUPABASE_DB_URL or ADMIN_PASSWORD secret is missing - admin setup skipped"
+            exit 0
+          fi
+          COUNT=$(psql "$SUPABASE_DB_URL" -tA -c "select count(*) from auth.users where lower(email) = 'admin@gmail.com'")
+          if [ "$COUNT" = "0" ]; then
+            jq -n --arg e "admin@gmail.com" --arg p "$ADMIN_PASSWORD" '{email:$e,password:$p}' | \
+              curl -s -o /dev/null -w "create admin: HTTP %{http_code}\n" -X POST "$SUPABASE_URL/auth/v1/signup" \
+                -H "apikey: $SUPABASE_ANON_KEY" -H "Content-Type: application/json" -d @-
+          fi
+          psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -v admin_pw="$ADMIN_PASSWORD" -f supabase/admin.sql
+          echo "Admin account is ready."
+
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 40
